@@ -1,65 +1,814 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useCallback, useMemo } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
+import { Calculator, TrendingUp, Download, RefreshCw } from "lucide-react";
+import { calculatePnLCurve, calculateTimeCurve, blackScholesPrice } from "../lib/blackscholes";
+import type { PnLPoint, TimePoint } from "../lib/blackscholes";
+
+interface OptionContract {
+  ticker: string;
+  strikePrice: number;
+  optionType: string;
+  expirationDate: string;
+  lastPrice: number;
+  bid: number;
+  ask: number;
+  midpoint: number;
+  volume: number;
+  openInterest: number;
+  impliedVolatility: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+}
 
 export default function Home() {
+  // Manual input state
+  const [optionType, setOptionType] = useState<"call" | "put">("call");
+  const [spotPrice, setSpotPrice] = useState<string>("590");
+  const [strikePrice, setStrikePrice] = useState<string>("590");
+  const [costBasis, setCostBasis] = useState<string>("1.50");
+  const [iv, setIv] = useState<string>("25");
+  const [timeToExpiry, setTimeToExpiry] = useState<string>("0.5");
+  const [riskFreeRate] = useState<string>("5.25");
+  const [rangeBelow, setRangeBelow] = useState<string>("5");
+  const [rangeAbove, setRangeAbove] = useState<string>("5");
+
+  // Polygon.io state
+  const [ticker, setTicker] = useState<string>("SPY");
+  const [loadingChain, setLoadingChain] = useState(false);
+  const [chainError, setChainError] = useState<string>("");
+  const [optionChain, setOptionChain] = useState<OptionContract[]>([]);
+  const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [selectedContract, setSelectedContract] = useState<OptionContract | null>(null);
+
+  // Chart tab state
+  const [activeTab, setActiveTab] = useState<"price" | "time">("price");
+
+  // Time chart state
+  const [timeChartData, setTimeChartData] = useState<TimePoint[]>([]);
+  const [timeChartSpot, setTimeChartSpot] = useState<string>("");
+
+  // Chart data
+  const [chartData, setChartData] = useState<PnLPoint[]>([]);
+  const [currentCalc, setCurrentCalc] = useState<{
+    price: number;
+    intrinsic: number;
+    extrinsic: number;
+    delta: number;
+    gamma: number;
+    theta: number;
+    vega: number;
+  } | null>(null);
+
+  const calculateChart = useCallback(() => {
+    const spot = parseFloat(spotPrice);
+    const strike = parseFloat(strikePrice);
+    const cost = parseFloat(costBasis);
+    const ivVal = parseFloat(iv) / 100;
+    const tte = parseFloat(timeToExpiry) / 24; // convert hours to days, then to years
+    const tteYears = tte / 365;
+    const rfr = parseFloat(riskFreeRate) / 100;
+    const rBelow = parseFloat(rangeBelow);
+    const rAbove = parseFloat(rangeAbove);
+
+    if (isNaN(spot) || isNaN(strike) || isNaN(cost) || isNaN(ivVal) || isNaN(tte)) {
+      return;
+    }
+
+    const params = {
+      spotPrice: spot,
+      strikePrice: strike,
+      timeToExpiry: tteYears,
+      riskFreeRate: rfr,
+      impliedVolatility: ivVal,
+      optionType,
+    };
+
+    const data = calculatePnLCurve(params, cost, rBelow, rAbove, 200);
+    setChartData(data);
+
+    const current = blackScholesPrice(params);
+    setCurrentCalc({
+      price: current.price,
+      intrinsic: current.intrinsic,
+      extrinsic: current.extrinsic,
+      delta: current.greeks.delta,
+      gamma: current.greeks.gamma,
+      theta: current.greeks.theta,
+      vega: current.greeks.vega,
+    });
+  }, [spotPrice, strikePrice, costBasis, iv, timeToExpiry, riskFreeRate, optionType, rangeBelow, rangeAbove]);
+
+  // Dropdown options: spot ± $5 in $0.50 steps
+  const spotPriceOptions = useMemo(() => {
+    const spot = parseFloat(spotPrice);
+    if (isNaN(spot)) return [];
+    const options: number[] = [];
+    for (let p = spot - 5; p <= spot + 5 + 0.001; p += 0.5) {
+      options.push(Math.round(p * 100) / 100);
+    }
+    return options;
+  }, [spotPrice]);
+
+  const calculateTimeChart = useCallback((fixedSpot: number) => {
+    const strike = parseFloat(strikePrice);
+    const cost = parseFloat(costBasis);
+    const ivVal = parseFloat(iv) / 100;
+    const rfr = parseFloat(riskFreeRate) / 100;
+    if (isNaN(strike) || isNaN(cost) || isNaN(ivVal) || isNaN(fixedSpot)) return;
+
+    const params = {
+      spotPrice: fixedSpot,
+      strikePrice: strike,
+      timeToExpiry: 390 / (365 * 24 * 60), // full day TTE as starting point (unused — curve iterates internally)
+      riskFreeRate: rfr,
+      impliedVolatility: ivVal,
+      optionType,
+    };
+
+    const data = calculateTimeCurve(params, cost, fixedSpot, 5);
+    setTimeChartData(data);
+  }, [strikePrice, costBasis, iv, riskFreeRate, optionType]);
+
+  const handleTimeSpotChange = useCallback((val: string) => {
+    setTimeChartSpot(val);
+    calculateTimeChart(parseFloat(val));
+  }, [calculateTimeChart]);
+
+  const fetchOptionChain = useCallback(async () => {
+    setLoadingChain(true);
+    setChainError("");
+    setOptionChain([]);
+    setSelectedContract(null);
+
+    try {
+      const res = await fetch(`/api/options?ticker=${encodeURIComponent(ticker)}`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        setChainError(data.error || "Failed to fetch option chain");
+        if (data.currentPrice) setLivePrice(data.currentPrice);
+        return;
+      }
+
+      setLivePrice(data.currentPrice);
+      setOptionChain(data.options);
+      setSpotPrice(data.currentPrice.toString());
+    } catch {
+      setChainError("Network error fetching option chain");
+    } finally {
+      setLoadingChain(false);
+    }
+  }, [ticker]);
+
+  const selectContract = useCallback(
+    (contract: OptionContract) => {
+      setSelectedContract(contract);
+      setStrikePrice(contract.strikePrice.toString());
+      setOptionType(contract.optionType as "call" | "put");
+      setCostBasis(
+        (contract.midpoint || contract.lastPrice || ((contract.bid + contract.ask) / 2)).toFixed(2)
+      );
+      if (contract.impliedVolatility > 0) {
+        setIv((contract.impliedVolatility * 100).toFixed(1));
+      }
+    },
+    []
+  );
+
+  const calls = useMemo(
+    () => optionChain.filter((o) => o.optionType === "call"),
+    [optionChain]
+  );
+  const puts = useMemo(
+    () => optionChain.filter((o) => o.optionType === "put"),
+    [optionChain]
+  );
+
+  const breakeven = useMemo(() => {
+    const strike = parseFloat(strikePrice);
+    const cost = parseFloat(costBasis);
+    if (isNaN(strike) || isNaN(cost)) return null;
+    return optionType === "call" ? strike + cost : strike - cost;
+  }, [strikePrice, costBasis, optionType]);
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="min-h-screen bg-[#0f1117] text-gray-100">
+      {/* Header */}
+      <header className="border-b border-gray-800 bg-[#0f1117]/80 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center gap-3">
+          <Calculator className="w-6 h-6 text-emerald-400" />
+          <h1 className="text-xl font-bold tracking-tight">0DTE Option Value Calculator</h1>
+          <span className="ml-auto text-xs text-gray-500">Black-Scholes Model</span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+        {/* Polygon.io Data Fetch */}
+        <section className="bg-[#1a1d27] rounded-xl border border-gray-800 p-5">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <Download className="w-4 h-4" />
+            Live Option Chain (Polygon.io)
+          </h2>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Ticker</label>
+              <input
+                type="text"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                className="bg-[#0f1117] border border-gray-700 rounded-lg px-3 py-2 text-sm w-24 focus:outline-none focus:border-emerald-500 transition-colors"
+              />
+            </div>
+            <button
+              onClick={fetchOptionChain}
+              disabled={loadingChain}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+              <RefreshCw className={`w-4 h-4 ${loadingChain ? "animate-spin" : ""}`} />
+              {loadingChain ? "Loading..." : "Fetch 0DTE Chain"}
+            </button>
+            {livePrice && (
+              <span className="text-sm text-emerald-400 font-mono">
+                {ticker}: ${livePrice.toFixed(2)}
+              </span>
+            )}
+          </div>
+          {chainError && (
+            <p className="mt-3 text-sm text-red-400">{chainError}</p>
+          )}
+
+          {/* Option Chain Table */}
+          {optionChain.length > 0 && (
+            <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Calls */}
+              <div>
+                <h3 className="text-xs font-semibold text-emerald-400 uppercase mb-2">
+                  Calls ({calls.length})
+                </h3>
+                <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#0f1117] sticky top-0">
+                      <tr className="text-gray-500">
+                        <th className="px-2 py-1 text-left">Strike</th>
+                        <th className="px-2 py-1 text-right">Bid</th>
+                        <th className="px-2 py-1 text-right">Ask</th>
+                        <th className="px-2 py-1 text-right">IV</th>
+                        <th className="px-2 py-1 text-right">Delta</th>
+                        <th className="px-2 py-1 text-right">Vol</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {calls.map((c) => (
+                        <tr
+                          key={c.ticker}
+                          onClick={() => selectContract(c)}
+                          className={`cursor-pointer hover:bg-emerald-900/30 transition-colors ${
+                            selectedContract?.ticker === c.ticker
+                              ? "bg-emerald-900/50"
+                              : ""
+                          } ${
+                            livePrice && c.strikePrice <= livePrice
+                              ? "text-emerald-300"
+                              : "text-gray-400"
+                          }`}
+                        >
+                          <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">
+                            {(c.impliedVolatility * 100).toFixed(0)}%
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono">{c.delta.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.volume}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Puts */}
+              <div>
+                <h3 className="text-xs font-semibold text-red-400 uppercase mb-2">
+                  Puts ({puts.length})
+                </h3>
+                <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#0f1117] sticky top-0">
+                      <tr className="text-gray-500">
+                        <th className="px-2 py-1 text-left">Strike</th>
+                        <th className="px-2 py-1 text-right">Bid</th>
+                        <th className="px-2 py-1 text-right">Ask</th>
+                        <th className="px-2 py-1 text-right">IV</th>
+                        <th className="px-2 py-1 text-right">Delta</th>
+                        <th className="px-2 py-1 text-right">Vol</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {puts.map((c) => (
+                        <tr
+                          key={c.ticker}
+                          onClick={() => selectContract(c)}
+                          className={`cursor-pointer hover:bg-red-900/30 transition-colors ${
+                            selectedContract?.ticker === c.ticker
+                              ? "bg-red-900/50"
+                              : ""
+                          } ${
+                            livePrice && c.strikePrice >= livePrice
+                              ? "text-red-300"
+                              : "text-gray-400"
+                          }`}
+                        >
+                          <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">
+                            {(c.impliedVolatility * 100).toFixed(0)}%
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono">{c.delta.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.volume}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* Calculator Inputs */}
+        <section className="bg-[#1a1d27] rounded-xl border border-gray-800 p-5">
+          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4" />
+            Option Parameters
+          </h2>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+            {/* Option Type Toggle */}
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Type</label>
+              <div className="flex rounded-lg overflow-hidden border border-gray-700">
+                <button
+                  onClick={() => setOptionType("call")}
+                  className={`flex-1 py-2 text-sm font-medium transition-colors ${
+                    optionType === "call"
+                      ? "bg-emerald-600 text-white"
+                      : "bg-[#0f1117] text-gray-400 hover:text-white"
+                  }`}
+                >
+                  CALL
+                </button>
+                <button
+                  onClick={() => setOptionType("put")}
+                  className={`flex-1 py-2 text-sm font-medium transition-colors ${
+                    optionType === "put"
+                      ? "bg-red-600 text-white"
+                      : "bg-[#0f1117] text-gray-400 hover:text-white"
+                  }`}
+                >
+                  PUT
+                </button>
+              </div>
+            </div>
+
+            <InputField label="Stock Price ($)" value={spotPrice} onChange={setSpotPrice} />
+            <InputField label="Strike Price ($)" value={strikePrice} onChange={setStrikePrice} />
+            <InputField label="Option Cost ($)" value={costBasis} onChange={setCostBasis} />
+            <InputField label="IV (%)" value={iv} onChange={setIv} />
+            <InputField label="Time to Expiry (hrs)" value={timeToExpiry} onChange={setTimeToExpiry} />
+            <InputField label="Risk-Free Rate (%)" value={riskFreeRate} onChange={() => {}} disabled />
+            <InputField label="Range Below ($)" value={rangeBelow} onChange={setRangeBelow} />
+            <InputField label="Range Above ($)" value={rangeAbove} onChange={setRangeAbove} />
+
+            <div className="flex items-end">
+              <button
+                onClick={calculateChart}
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                Calculate
+              </button>
+            </div>
+          </div>
+
+          {/* Current Calculation Summary */}
+          {currentCalc && (
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+              <StatCard label="Theoretical Price" value={`$${currentCalc.price.toFixed(2)}`} />
+              <StatCard label="Intrinsic" value={`$${currentCalc.intrinsic.toFixed(2)}`} />
+              <StatCard label="Extrinsic" value={`$${currentCalc.extrinsic.toFixed(2)}`} />
+              <StatCard
+                label="Delta"
+                value={currentCalc.delta.toFixed(4)}
+                color={currentCalc.delta >= 0 ? "text-emerald-400" : "text-red-400"}
+              />
+              <StatCard label="Gamma" value={currentCalc.gamma.toFixed(4)} />
+              <StatCard
+                label="Theta"
+                value={currentCalc.theta.toFixed(4)}
+                color="text-red-400"
+              />
+              <StatCard label="Vega" value={currentCalc.vega.toFixed(4)} />
+            </div>
+          )}
+        </section>
+
+        {/* Tabbed Chart Section */}
+        {(chartData.length > 0 || timeChartData.length > 0) && (
+          <section className="bg-[#1a1d27] rounded-xl border border-gray-800 p-5">
+            {/* Tab Bar */}
+            <div className="flex items-center gap-1 mb-5 border-b border-gray-800 pb-0">
+              <button
+                onClick={() => setActiveTab("price")}
+                className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors border-b-2 -mb-px ${
+                  activeTab === "price"
+                    ? "border-emerald-500 text-emerald-400 bg-emerald-950/30"
+                    : "border-transparent text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Value vs Price
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab("time");
+                  if (timeChartSpot === "" && spotPriceOptions.length > 0) {
+                    const atm = spotPriceOptions.reduce((prev, cur) =>
+                      Math.abs(cur - parseFloat(spotPrice)) < Math.abs(prev - parseFloat(spotPrice)) ? cur : prev
+                    );
+                    handleTimeSpotChange(atm.toString());
+                  }
+                }}
+                className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors border-b-2 -mb-px ${
+                  activeTab === "time"
+                    ? "border-blue-500 text-blue-400 bg-blue-950/30"
+                    : "border-transparent text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                Value vs Time
+              </button>
+            </div>
+
+            {/* Tab 1: Value vs Price */}
+            {activeTab === "price" && chartData.length > 0 && (
+              <>
+                <div className="h-[500px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart
+                      data={chartData}
+                      margin={{ top: 10, right: 30, left: 10, bottom: 10 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3a" />
+                      <XAxis
+                        dataKey="stockPrice"
+                        stroke="#6b7280"
+                        fontSize={11}
+                        tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+                        label={{
+                          value: "Stock Price",
+                          position: "insideBottom",
+                          offset: -5,
+                          style: { fill: "#6b7280", fontSize: 12 },
+                        }}
+                      />
+                      <YAxis
+                        stroke="#6b7280"
+                        fontSize={11}
+                        tickFormatter={(v: number) => `$${v.toFixed(2)}`}
+                        label={{
+                          value: "Option Value / P&L ($)",
+                          angle: -90,
+                          position: "insideLeft",
+                          offset: 10,
+                          style: { fill: "#6b7280", fontSize: 12 },
+                        }}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#1a1d27",
+                          border: "1px solid #374151",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                        }}
+                        formatter={(value: unknown, name: unknown) => [
+                          `$${(value as number).toFixed(2)}`,
+                          name as string,
+                        ]}
+                        labelFormatter={(label: unknown) => `Stock: $${(label as number).toFixed(2)}`}
+                      />
+                      <Legend />
+                      <ReferenceLine
+                        x={parseFloat(spotPrice)}
+                        stroke="#6b7280"
+                        strokeDasharray="5 5"
+                        label={{
+                          value: `Current: $${spotPrice}`,
+                          position: "top",
+                          style: { fill: "#9ca3af", fontSize: 10 },
+                        }}
+                      />
+                      <ReferenceLine
+                        x={parseFloat(strikePrice)}
+                        stroke="#f59e0b"
+                        strokeDasharray="5 5"
+                        label={{
+                          value: `Strike: $${strikePrice}`,
+                          position: "top",
+                          style: { fill: "#f59e0b", fontSize: 10 },
+                        }}
+                      />
+                      {breakeven && (
+                        <ReferenceLine
+                          x={breakeven}
+                          stroke="#ef4444"
+                          strokeDasharray="3 3"
+                          label={{
+                            value: `BE: $${breakeven.toFixed(2)}`,
+                            position: "top",
+                            style: { fill: "#ef4444", fontSize: 10 },
+                          }}
+                        />
+                      )}
+                      <ReferenceLine y={parseFloat(costBasis)} stroke="#6366f1" strokeDasharray="3 3" />
+                      <ReferenceLine y={0} stroke="#374151" />
+                      <Line
+                        type="monotone"
+                        dataKey="optionValue"
+                        name="Option Value"
+                        stroke="#10b981"
+                        strokeWidth={2.5}
+                        dot={false}
+                        activeDot={{ r: 4, fill: "#10b981" }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="intrinsicValue"
+                        name="Intrinsic Value"
+                        stroke="#f59e0b"
+                        strokeWidth={1.5}
+                        strokeDasharray="5 5"
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="pnl"
+                        name="P&L"
+                        stroke="#6366f1"
+                        strokeWidth={2}
+                        dot={false}
+                        activeDot={{ r: 4, fill: "#6366f1" }}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
+                  <span><span className="inline-block w-3 h-0.5 bg-emerald-500 mr-1 align-middle" /> Option Value (Black-Scholes)</span>
+                  <span><span className="inline-block w-3 h-0.5 bg-amber-500 mr-1 align-middle" /> Intrinsic Value</span>
+                  <span><span className="inline-block w-3 h-0.5 bg-indigo-500 mr-1 align-middle" /> P&L (vs cost basis)</span>
+                  {breakeven && <span className="text-red-400">Breakeven: ${breakeven.toFixed(2)}</span>}
+                </div>
+              </>
+            )}
+
+            {/* Tab 2: Value vs Time */}
+            {activeTab === "time" && (
+              <>
+                {/* Stock price dropdown */}
+                <div className="flex items-center gap-3 mb-4">
+                  <label className="text-xs text-gray-500 whitespace-nowrap">Stock Price (fixed)</label>
+                  <select
+                    value={timeChartSpot}
+                    onChange={(e) => handleTimeSpotChange(e.target.value)}
+                    className="bg-[#0f1117] border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 transition-colors"
+                  >
+                    {spotPriceOptions.length === 0 && (
+                      <option value="">Enter stock price first</option>
+                    )}
+                    {spotPriceOptions.map((p) => (
+                      <option key={p} value={p}>
+                        ${p.toFixed(2)}{Math.abs(p - parseFloat(spotPrice)) < 0.001 ? " (ATM)" : p > parseFloat(spotPrice) ? ` (+$${(p - parseFloat(spotPrice)).toFixed(2)})` : ` (-$${(parseFloat(spotPrice) - p).toFixed(2)})`}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-600">Shows theta decay from 9:30 AM → 4:00 PM ET assuming stock stays at this price</span>
+                </div>
+
+                {timeChartData.length > 0 ? (
+                  <>
+                    <div className="h-[500px]">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart
+                          data={timeChartData}
+                          margin={{ top: 10, right: 30, left: 10, bottom: 30 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3a" />
+                          <XAxis
+                            dataKey="time"
+                            stroke="#6b7280"
+                            fontSize={10}
+                            interval={11}
+                            label={{
+                              value: "Time of Day (ET)",
+                              position: "insideBottom",
+                              offset: -15,
+                              style: { fill: "#6b7280", fontSize: 12 },
+                            }}
+                          />
+                          <YAxis
+                            stroke="#6b7280"
+                            fontSize={11}
+                            tickFormatter={(v: number) => `$${v.toFixed(2)}`}
+                            label={{
+                              value: "Contract Price ($)",
+                              angle: -90,
+                              position: "insideLeft",
+                              offset: 10,
+                              style: { fill: "#6b7280", fontSize: 12 },
+                            }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: "#1a1d27",
+                              border: "1px solid #374151",
+                              borderRadius: "8px",
+                              fontSize: "12px",
+                            }}
+                            formatter={(value: unknown, name: unknown) => {
+                              const v = value as number;
+                              const n = name as string;
+                              return [n === "P&L" ? `${v >= 0 ? "+" : ""}$${v.toFixed(2)}` : `$${v.toFixed(2)}`, n];
+                            }}
+                            labelFormatter={(label: unknown) => `Time: ${label as string}`}
+                          />
+                          <Legend />
+                          <ReferenceLine
+                            y={parseFloat(costBasis)}
+                            stroke="#6366f1"
+                            strokeDasharray="4 4"
+                            label={{
+                              value: `Cost: $${costBasis}`,
+                              position: "right",
+                              style: { fill: "#818cf8", fontSize: 10 },
+                            }}
+                          />
+                          <ReferenceLine y={0} stroke="#374151" />
+                          <Line
+                            type="monotone"
+                            dataKey="optionValue"
+                            name="Option Value"
+                            stroke="#10b981"
+                            strokeWidth={2.5}
+                            dot={false}
+                            activeDot={{ r: 4, fill: "#10b981" }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="intrinsicValue"
+                            name="Intrinsic Value"
+                            stroke="#f59e0b"
+                            strokeWidth={1.5}
+                            strokeDasharray="5 5"
+                            dot={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="pnl"
+                            name="P&L"
+                            stroke="#6366f1"
+                            strokeWidth={2}
+                            dot={false}
+                            activeDot={{ r: 4, fill: "#6366f1" }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
+                      <span><span className="inline-block w-3 h-0.5 bg-emerald-500 mr-1 align-middle" /> Option Value (theta decay)</span>
+                      <span><span className="inline-block w-3 h-0.5 bg-amber-500 mr-1 align-middle" /> Intrinsic Value (flat if stock fixed)</span>
+                      <span><span className="inline-block w-3 h-0.5 bg-indigo-500 mr-1 align-middle" /> P&L (vs cost basis)</span>
+                      <span className="text-blue-400">Fixed stock: ${parseFloat(timeChartSpot).toFixed(2)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center text-gray-600 text-sm">
+                    Select a stock price from the dropdown above
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {/* P&L Table */}
+        {chartData.length > 0 && (
+          <section className="bg-[#1a1d27] rounded-xl border border-gray-800 p-5">
+            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
+              P&L Table (Key Levels)
+            </h2>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-700">
+                    <th className="px-3 py-2 text-left">Stock Price</th>
+                    <th className="px-3 py-2 text-right">Option Value</th>
+                    <th className="px-3 py-2 text-right">Intrinsic</th>
+                    <th className="px-3 py-2 text-right">P&L ($)</th>
+                    <th className="px-3 py-2 text-right">P&L (%)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {chartData
+                    .filter((_, i) => i % 20 === 0 || i === chartData.length - 1)
+                    .map((point, i) => (
+                      <tr
+                        key={i}
+                        className="border-b border-gray-800 hover:bg-gray-800/50"
+                      >
+                        <td className="px-3 py-2 font-mono">${point.stockPrice.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          ${point.optionValue.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          ${point.intrinsicValue.toFixed(2)}
+                        </td>
+                        <td
+                          className={`px-3 py-2 text-right font-mono ${
+                            point.pnl >= 0 ? "text-emerald-400" : "text-red-400"
+                          }`}
+                        >
+                          {point.pnl >= 0 ? "+" : ""}${point.pnl.toFixed(2)}
+                        </td>
+                        <td
+                          className={`px-3 py-2 text-right font-mono ${
+                            point.pnlPercent >= 0 ? "text-emerald-400" : "text-red-400"
+                          }`}
+                        >
+                          {point.pnlPercent >= 0 ? "+" : ""}{point.pnlPercent.toFixed(1)}%
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
       </main>
+    </div>
+  );
+}
+
+function InputField({
+  label,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs text-gray-500">{label}</label>
+      <input
+        type="number"
+        step="any"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="bg-[#0f1117] border border-gray-700 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 transition-colors disabled:opacity-50"
+      />
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  color = "text-white",
+}: {
+  label: string;
+  value: string;
+  color?: string;
+}) {
+  return (
+    <div className="bg-[#0f1117] rounded-lg border border-gray-800 p-3">
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{label}</div>
+      <div className={`text-sm font-mono font-semibold mt-1 ${color}`}>{value}</div>
     </div>
   );
 }
