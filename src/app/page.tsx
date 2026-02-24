@@ -38,13 +38,22 @@ const DONATION_ADDRESS = "0x73B61c903Cab90D5C251E58FEa6D90cC3d006a68";
 
 function hoursUntil4pmET(): number {
   const now = new Date();
-  const etOffset = -5; // ET standard; DST not handled for simplicity
-  const etNow = new Date(now.getTime() + (now.getTimezoneOffset() + etOffset * -60) * 60000);
-  const close = new Date(etNow);
-  close.setHours(16, 0, 0, 0);
-  const diffMs = close.getTime() - etNow.getTime();
-  if (diffMs <= 0) return 0;
-  return Math.min(diffMs / 3600000, 6.5); // cap at full trading day
+  // Use IANA timezone to correctly handle EST/EDT automatically
+  const etParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+  const h = parseInt(etParts.find(p => p.type === "hour")!.value);
+  const m = parseInt(etParts.find(p => p.type === "minute")!.value);
+  const s = parseInt(etParts.find(p => p.type === "second")!.value);
+  const etMinutes = h * 60 + m + s / 60;
+  const closeMinutes = 16 * 60; // 4:00 PM
+  const diffMinutes = closeMinutes - etMinutes;
+  if (diffMinutes <= 0) return 0;
+  return Math.min(diffMinutes / 60, 6.5);
 }
 
 export default function Home() {
