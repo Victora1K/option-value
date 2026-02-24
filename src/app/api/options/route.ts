@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const runtime = "edge";
+
 const POLYGON_BASE = "https://api.polygon.io";
 
 // Ticker must be 1-5 uppercase letters only
