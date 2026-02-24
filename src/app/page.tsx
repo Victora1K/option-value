@@ -12,7 +12,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { Calculator, TrendingUp, Download, RefreshCw } from "lucide-react";
+import { Calculator, TrendingUp, Download, RefreshCw, Copy, Check } from "lucide-react";
 import { calculatePnLCurve, calculateTimeCurve, blackScholesPrice } from "../lib/blackscholes";
 import type { PnLPoint, TimePoint } from "../lib/blackscholes";
 
@@ -34,6 +34,19 @@ interface OptionContract {
   vega: number;
 }
 
+const DONATION_ADDRESS = "0x73B61c903Cab90D5C251E58FEa6D90cC3d006a68";
+
+function hoursUntil4pmET(): number {
+  const now = new Date();
+  const etOffset = -5; // ET standard; DST not handled for simplicity
+  const etNow = new Date(now.getTime() + (now.getTimezoneOffset() + etOffset * -60) * 60000);
+  const close = new Date(etNow);
+  close.setHours(16, 0, 0, 0);
+  const diffMs = close.getTime() - etNow.getTime();
+  if (diffMs <= 0) return 0;
+  return Math.min(diffMs / 3600000, 6.5); // cap at full trading day
+}
+
 export default function Home() {
   // Manual input state
   const [optionType, setOptionType] = useState<"call" | "put">("call");
@@ -41,10 +54,12 @@ export default function Home() {
   const [strikePrice, setStrikePrice] = useState<string>("590");
   const [costBasis, setCostBasis] = useState<string>("1.50");
   const [iv, setIv] = useState<string>("25");
-  const [timeToExpiry, setTimeToExpiry] = useState<string>("0.5");
+  const [timeToExpiry, setTimeToExpiry] = useState<string>(() => hoursUntil4pmET().toFixed(2));
   const [riskFreeRate] = useState<string>("5.25");
   const [rangeBelow, setRangeBelow] = useState<string>("5");
   const [rangeAbove, setRangeAbove] = useState<string>("5");
+  const [timeToHold, setTimeToHold] = useState<string>("1");
+  const [copied, setCopied] = useState(false);
 
   // Polygon.io state
   const [ticker, setTicker] = useState<string>("SPY");
@@ -185,9 +200,18 @@ export default function Home() {
       if (contract.impliedVolatility > 0) {
         setIv((contract.impliedVolatility * 100).toFixed(1));
       }
+      // Auto-populate time to expiry from current ET clock
+      setTimeToExpiry(hoursUntil4pmET().toFixed(2));
     },
     []
   );
+
+  const handleCopyDonation = useCallback(() => {
+    navigator.clipboard.writeText(DONATION_ADDRESS).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, []);
 
   const calls = useMemo(
     () => optionChain.filter((o) => o.optionType === "call"),
@@ -205,14 +229,67 @@ export default function Home() {
     return optionType === "call" ? strike + cost : strike - cost;
   }, [strikePrice, costBasis, optionType]);
 
+  // Time-to-hold vertical line: find minutesSinceOpen for the hold time
+  const holdLineTime = useMemo(() => {
+    const tte = parseFloat(timeToExpiry);
+    const hold = parseFloat(timeToHold);
+    if (isNaN(tte) || isNaN(hold)) return null;
+    const remainingAfterHold = tte - hold;
+    if (remainingAfterHold < 0) return null;
+    // trading minutes elapsed = total trading minutes - remaining minutes
+    const totalTradingHrs = 6.5;
+    const elapsedHrs = totalTradingHrs - tte + hold;
+    const elapsedMins = Math.round(elapsedHrs * 60);
+    if (elapsedMins < 0 || elapsedMins > 390) return null;
+    return elapsedMins;
+  }, [timeToExpiry, timeToHold]);
+
+  // P&L table recalculated at hold-time TTE
+  const holdChartData = useMemo(() => {
+    const spot = parseFloat(spotPrice);
+    const strike = parseFloat(strikePrice);
+    const cost = parseFloat(costBasis);
+    const ivVal = parseFloat(iv) / 100;
+    const tte = parseFloat(timeToExpiry);
+    const hold = parseFloat(timeToHold);
+    const rfr = parseFloat(riskFreeRate) / 100;
+    const rBelow = parseFloat(rangeBelow);
+    const rAbove = parseFloat(rangeAbove);
+    if (isNaN(spot) || isNaN(strike) || isNaN(cost) || isNaN(ivVal) || isNaN(tte) || isNaN(hold)) return null;
+    const remainingHrs = Math.max(tte - hold, 0);
+    const tteYears = (remainingHrs / 24) / 365;
+    const params = { spotPrice: spot, strikePrice: strike, timeToExpiry: tteYears, riskFreeRate: rfr, impliedVolatility: ivVal, optionType };
+    return calculatePnLCurve(params, cost, rBelow, rAbove, 200);
+  }, [spotPrice, strikePrice, costBasis, iv, timeToExpiry, timeToHold, riskFreeRate, optionType, rangeBelow, rangeAbove]);
+
+  // Find the time label for the hold line to use as ReferenceLine x value
+  const holdLineLabel = useMemo(() => {
+    if (holdLineTime === null || timeChartData.length === 0) return null;
+    const point = timeChartData.find(p => p.minutesSinceOpen >= holdLineTime);
+    return point?.time ?? null;
+  }, [holdLineTime, timeChartData]);
+
   return (
     <div className="min-h-screen bg-[#0f1117] text-gray-100">
       {/* Header */}
       <header className="border-b border-gray-800 bg-[#0f1117]/80 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center gap-3">
-          <Calculator className="w-6 h-6 text-emerald-400" />
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+          <Calculator className="w-6 h-6 text-emerald-400 shrink-0" />
           <h1 className="text-xl font-bold tracking-tight">0DTE Option Value Calculator</h1>
-          <span className="ml-auto text-xs text-gray-500">Black-Scholes Model</span>
+          <span className="text-[10px] text-yellow-600 bg-yellow-950/40 border border-yellow-900/50 rounded px-2 py-0.5">
+            Educational purposes only — not financial advice
+          </span>
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              onClick={handleCopyDonation}
+              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-emerald-400 transition-colors border border-gray-700 hover:border-emerald-700 rounded-lg px-3 py-1.5"
+              title={DONATION_ADDRESS}
+            >
+              {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              {copied ? "Copied!" : "Support / Donate"}
+            </button>
+            <span className="text-xs text-gray-500">Black-Scholes Model</span>
+          </div>
         </div>
       </header>
 
@@ -268,7 +345,10 @@ export default function Home() {
                         <th className="px-2 py-1 text-right">Ask</th>
                         <th className="px-2 py-1 text-right">IV</th>
                         <th className="px-2 py-1 text-right">Delta</th>
+                        <th className="px-2 py-1 text-right">Gamma</th>
                         <th className="px-2 py-1 text-right">Vol</th>
+                        <th className="px-2 py-1 text-right">Vega</th>
+                        <th className="px-2 py-1 text-right">Theta</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -289,11 +369,12 @@ export default function Home() {
                           <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
-                          <td className="px-2 py-1 text-right font-mono">
-                            {(c.impliedVolatility * 100).toFixed(0)}%
-                          </td>
+                          <td className="px-2 py-1 text-right font-mono">{(c.impliedVolatility * 100).toFixed(0)}%</td>
                           <td className="px-2 py-1 text-right font-mono">{c.delta.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.gamma.toFixed(4)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.volume}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.vega.toFixed(4)}</td>
+                          <td className="px-2 py-1 text-right font-mono text-red-400">{c.theta.toFixed(4)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -315,7 +396,10 @@ export default function Home() {
                         <th className="px-2 py-1 text-right">Ask</th>
                         <th className="px-2 py-1 text-right">IV</th>
                         <th className="px-2 py-1 text-right">Delta</th>
+                        <th className="px-2 py-1 text-right">Gamma</th>
                         <th className="px-2 py-1 text-right">Vol</th>
+                        <th className="px-2 py-1 text-right">Vega</th>
+                        <th className="px-2 py-1 text-right">Theta</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -336,11 +420,12 @@ export default function Home() {
                           <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
-                          <td className="px-2 py-1 text-right font-mono">
-                            {(c.impliedVolatility * 100).toFixed(0)}%
-                          </td>
+                          <td className="px-2 py-1 text-right font-mono">{(c.impliedVolatility * 100).toFixed(0)}%</td>
                           <td className="px-2 py-1 text-right font-mono">{c.delta.toFixed(2)}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.gamma.toFixed(4)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.volume}</td>
+                          <td className="px-2 py-1 text-right font-mono">{c.vega.toFixed(4)}</td>
+                          <td className="px-2 py-1 text-right font-mono text-red-400">{c.theta.toFixed(4)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -391,6 +476,7 @@ export default function Home() {
             <InputField label="Option Cost ($)" value={costBasis} onChange={setCostBasis} />
             <InputField label="IV (%)" value={iv} onChange={setIv} />
             <InputField label="Time to Expiry (hrs)" value={timeToExpiry} onChange={setTimeToExpiry} />
+            <InputField label="Time to Hold (hrs)" value={timeToHold} onChange={setTimeToHold} />
             <InputField label="Risk-Free Rate (%)" value={riskFreeRate} onChange={() => {}} disabled />
             <InputField label="Range Below ($)" value={rangeBelow} onChange={setRangeBelow} />
             <InputField label="Range Above ($)" value={rangeAbove} onChange={setRangeAbove} />
@@ -665,6 +751,19 @@ export default function Home() {
                             }}
                           />
                           <ReferenceLine y={0} stroke="#374151" />
+                          {holdLineLabel && (
+                            <ReferenceLine
+                              x={holdLineLabel}
+                              stroke="#f97316"
+                              strokeWidth={2}
+                              strokeDasharray="6 3"
+                              label={{
+                                value: `Hold: ${timeToHold}h`,
+                                position: "top",
+                                style: { fill: "#f97316", fontSize: 10 },
+                              }}
+                            />
+                          )}
                           <Line
                             type="monotone"
                             dataKey="optionValue"
@@ -715,9 +814,16 @@ export default function Home() {
         {/* P&L Table */}
         {chartData.length > 0 && (
           <section className="bg-[#1a1d27] rounded-xl border border-gray-800 p-5">
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">
-              P&L Table (Key Levels)
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                P&L Table — After {timeToHold}h Hold
+              </h2>
+              <span className="text-xs text-orange-400 border border-orange-900/50 bg-orange-950/30 rounded px-2 py-0.5">
+                {parseFloat(timeToHold) >= parseFloat(timeToExpiry)
+                  ? "At expiry (intrinsic only)"
+                  : `${(parseFloat(timeToExpiry) - parseFloat(timeToHold)).toFixed(2)}h remaining at sell`}
+              </span>
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
@@ -730,7 +836,7 @@ export default function Home() {
                   </tr>
                 </thead>
                 <tbody>
-                  {chartData
+                  {(holdChartData ?? chartData)
                     .filter((_, i) => i % 20 === 0 || i === chartData.length - 1)
                     .map((point, i) => (
                       <tr
@@ -738,24 +844,12 @@ export default function Home() {
                         className="border-b border-gray-800 hover:bg-gray-800/50"
                       >
                         <td className="px-3 py-2 font-mono">${point.stockPrice.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          ${point.optionValue.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          ${point.intrinsicValue.toFixed(2)}
-                        </td>
-                        <td
-                          className={`px-3 py-2 text-right font-mono ${
-                            point.pnl >= 0 ? "text-emerald-400" : "text-red-400"
-                          }`}
-                        >
+                        <td className="px-3 py-2 text-right font-mono">${point.optionValue.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right font-mono">${point.intrinsicValue.toFixed(2)}</td>
+                        <td className={`px-3 py-2 text-right font-mono ${point.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {point.pnl >= 0 ? "+" : ""}${point.pnl.toFixed(2)}
                         </td>
-                        <td
-                          className={`px-3 py-2 text-right font-mono ${
-                            point.pnlPercent >= 0 ? "text-emerald-400" : "text-red-400"
-                          }`}
-                        >
+                        <td className={`px-3 py-2 text-right font-mono ${point.pnlPercent >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                           {point.pnlPercent >= 0 ? "+" : ""}{point.pnlPercent.toFixed(1)}%
                         </td>
                       </tr>
