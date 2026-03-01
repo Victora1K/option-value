@@ -7,9 +7,28 @@ const POLYGON_BASE = "https://api.polygon.io";
 // Ticker must be 1-5 uppercase letters only
 const TICKER_RE = /^[A-Z]{1,5}$/;
 
+function getExpiryDate(dte: number): string {
+  const d = new Date();
+  // Use ET date (options expire by ET date)
+  const etDate = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(d);
+  const [month, day, year] = etDate.split("/");
+  const base = new Date(`${year}-${month}-${day}T00:00:00`);
+  base.setDate(base.getDate() + dte);
+  // Skip weekends for 1 DTE: if Saturday -> Monday, if Sunday -> Monday
+  const dow = base.getDay();
+  if (dow === 6) base.setDate(base.getDate() + 2);
+  else if (dow === 0) base.setDate(base.getDate() + 1);
+  return base.toISOString().split("T")[0];
+}
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const rawTicker = (searchParams.get("ticker") || "SPY").toUpperCase().trim();
+  const dteParam = parseInt(searchParams.get("dte") || "0");
+  const dte = dteParam === 1 ? 1 : 0;
 
   if (!TICKER_RE.test(rawTicker)) {
     return NextResponse.json({ error: "Invalid ticker symbol" }, { status: 400 });
@@ -52,11 +71,10 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get today's date in YYYY-MM-DD format
-    const today = new Date();
-    const expDate = today.toISOString().split("T")[0];
+    // Get expiry date based on DTE
+    const expDate = getExpiryDate(dte);
 
-    // Fetch option contracts expiring today (0DTE)
+    // Fetch option contracts for the target expiry
     const contractsRes = await fetch(
       `${POLYGON_BASE}/v3/reference/options/contracts?underlying_ticker=${ticker}&expiration_date=${expDate}&limit=250&apiKey=${apiKey}`,
       { cache: "no-store" }
@@ -76,7 +94,7 @@ export async function GET(request: NextRequest) {
     if (contracts.length === 0) {
       return NextResponse.json(
         {
-          error: `No 0DTE options found for ${ticker} expiring ${expDate}. Markets may be closed.`,
+          error: `No ${dte}DTE options found for ${ticker} expiring ${expDate}. Markets may be closed or no contracts listed yet.`,
           currentPrice,
         },
         { status: 404 }
@@ -140,6 +158,7 @@ export async function GET(request: NextRequest) {
       ticker,
       currentPrice,
       expirationDate: expDate,
+      dte,
       options: optionsWithGreeks,
     });
   } catch (err) {

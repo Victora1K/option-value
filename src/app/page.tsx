@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import {
   LineChart,
   Line,
@@ -72,11 +72,18 @@ export default function Home() {
 
   // Polygon.io state
   const [ticker, setTicker] = useState<string>("SPY");
+  const [dte, setDte] = useState<0 | 1>(0);
   const [loadingChain, setLoadingChain] = useState(false);
   const [chainError, setChainError] = useState<string>("");
   const [optionChain, setOptionChain] = useState<OptionContract[]>([]);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [selectedContract, setSelectedContract] = useState<OptionContract | null>(null);
+
+  // Refs for ATM scroll
+  const callsContainerRef = useRef<HTMLDivElement>(null);
+  const putsContainerRef = useRef<HTMLDivElement>(null);
+  const atmCallRef = useRef<HTMLTableRowElement>(null);
+  const atmPutRef = useRef<HTMLTableRowElement>(null);
 
   // Chart tab state
   const [activeTab, setActiveTab] = useState<"price" | "time">("price");
@@ -179,7 +186,7 @@ export default function Home() {
     setSelectedContract(null);
 
     try {
-      const res = await fetch(`/api/options?ticker=${encodeURIComponent(ticker)}`);
+      const res = await fetch(`/api/options?ticker=${encodeURIComponent(ticker)}&dte=${dte}`);
       const data = await res.json();
 
       if (!res.ok) {
@@ -196,7 +203,7 @@ export default function Home() {
     } finally {
       setLoadingChain(false);
     }
-  }, [ticker]);
+  }, [ticker, dte]);
 
   const selectContract = useCallback(
     (contract: OptionContract) => {
@@ -230,6 +237,46 @@ export default function Home() {
     () => optionChain.filter((o) => o.optionType === "put"),
     [optionChain]
   );
+
+  // Index of the ATM row in each sorted list (closest strike to livePrice)
+  const atmCallIdx = useMemo(() => {
+    if (!livePrice || calls.length === 0) return -1;
+    let best = 0;
+    let bestDiff = Math.abs(calls[0].strikePrice - livePrice);
+    for (let i = 1; i < calls.length; i++) {
+      const d = Math.abs(calls[i].strikePrice - livePrice);
+      if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return best;
+  }, [calls, livePrice]);
+
+  const atmPutIdx = useMemo(() => {
+    if (!livePrice || puts.length === 0) return -1;
+    let best = 0;
+    let bestDiff = Math.abs(puts[0].strikePrice - livePrice);
+    for (let i = 1; i < puts.length; i++) {
+      const d = Math.abs(puts[i].strikePrice - livePrice);
+      if (d < bestDiff) { bestDiff = d; best = i; }
+    }
+    return best;
+  }, [puts, livePrice]);
+
+  // Scroll ATM row into center of the table container after chain loads
+  useEffect(() => {
+    if (atmCallRef.current && callsContainerRef.current) {
+      const container = callsContainerRef.current;
+      const row = atmCallRef.current;
+      container.scrollTop = row.offsetTop - container.clientHeight / 2 + row.clientHeight / 2;
+    }
+  }, [atmCallIdx]);
+
+  useEffect(() => {
+    if (atmPutRef.current && putsContainerRef.current) {
+      const container = putsContainerRef.current;
+      const row = atmPutRef.current;
+      container.scrollTop = row.offsetTop - container.clientHeight / 2 + row.clientHeight / 2;
+    }
+  }, [atmPutIdx]);
 
   const breakeven = useMemo(() => {
     const strike = parseFloat(strikePrice);
@@ -319,13 +366,35 @@ export default function Home() {
                 className="bg-[#0f1117] border border-gray-700 rounded-lg px-3 py-2 text-sm w-24 focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
+            {/* DTE toggle */}
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Expiry</label>
+              <div className="flex rounded-lg overflow-hidden border border-gray-700">
+                <button
+                  onClick={() => setDte(0)}
+                  className={`px-3 py-2 text-xs font-medium transition-colors ${
+                    dte === 0 ? "bg-emerald-700 text-white" : "bg-[#0f1117] text-gray-400 hover:text-white"
+                  }`}
+                >
+                  0 DTE
+                </button>
+                <button
+                  onClick={() => setDte(1)}
+                  className={`px-3 py-2 text-xs font-medium transition-colors ${
+                    dte === 1 ? "bg-blue-700 text-white" : "bg-[#0f1117] text-gray-400 hover:text-white"
+                  }`}
+                >
+                  1 DTE
+                </button>
+              </div>
+            </div>
             <button
               onClick={fetchOptionChain}
               disabled={loadingChain}
               className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
             >
               <RefreshCw className={`w-4 h-4 ${loadingChain ? "animate-spin" : ""}`} />
-              {loadingChain ? "Loading..." : "Fetch 0DTE Chain"}
+              {loadingChain ? "Loading..." : `Fetch ${dte}DTE Chain`}
             </button>
             {livePrice && (
               <span className="text-sm text-emerald-400 font-mono">
@@ -345,7 +414,7 @@ export default function Home() {
                 <h3 className="text-xs font-semibold text-emerald-400 uppercase mb-2">
                   Calls ({calls.length})
                 </h3>
-                <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
+                <div ref={callsContainerRef} className="max-h-64 overflow-y-auto rounded-lg border border-gray-700">
                   <table className="w-full text-xs">
                     <thead className="bg-[#0f1117] sticky top-0">
                       <tr className="text-gray-500">
@@ -361,13 +430,16 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {calls.map((c) => (
+                      {calls.map((c, i) => (
                         <tr
                           key={c.ticker}
+                          ref={i === atmCallIdx ? atmCallRef : undefined}
                           onClick={() => selectContract(c)}
                           className={`cursor-pointer hover:bg-emerald-900/30 transition-colors ${
                             selectedContract?.ticker === c.ticker
                               ? "bg-emerald-900/50"
+                              : i === atmCallIdx
+                              ? "bg-emerald-950/40 ring-1 ring-inset ring-emerald-700/50"
                               : ""
                           } ${
                             livePrice && c.strikePrice <= livePrice
@@ -375,7 +447,10 @@ export default function Home() {
                               : "text-gray-400"
                           }`}
                         >
-                          <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
+                          <td className="px-2 py-1 font-mono">
+                            {c.strikePrice}
+                            {i === atmCallIdx && <span className="ml-1 text-[9px] text-emerald-500 font-bold">ATM</span>}
+                          </td>
                           <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{(c.impliedVolatility * 100).toFixed(0)}%</td>
@@ -396,7 +471,7 @@ export default function Home() {
                 <h3 className="text-xs font-semibold text-red-400 uppercase mb-2">
                   Puts ({puts.length})
                 </h3>
-                <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-700">
+                <div ref={putsContainerRef} className="max-h-64 overflow-y-auto rounded-lg border border-gray-700">
                   <table className="w-full text-xs">
                     <thead className="bg-[#0f1117] sticky top-0">
                       <tr className="text-gray-500">
@@ -412,13 +487,16 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {puts.map((c) => (
+                      {puts.map((c, i) => (
                         <tr
                           key={c.ticker}
+                          ref={i === atmPutIdx ? atmPutRef : undefined}
                           onClick={() => selectContract(c)}
                           className={`cursor-pointer hover:bg-red-900/30 transition-colors ${
                             selectedContract?.ticker === c.ticker
                               ? "bg-red-900/50"
+                              : i === atmPutIdx
+                              ? "bg-red-950/40 ring-1 ring-inset ring-red-700/50"
                               : ""
                           } ${
                             livePrice && c.strikePrice >= livePrice
@@ -426,7 +504,10 @@ export default function Home() {
                               : "text-gray-400"
                           }`}
                         >
-                          <td className="px-2 py-1 font-mono">{c.strikePrice}</td>
+                          <td className="px-2 py-1 font-mono">
+                            {c.strikePrice}
+                            {i === atmPutIdx && <span className="ml-1 text-[9px] text-red-500 font-bold">ATM</span>}
+                          </td>
                           <td className="px-2 py-1 text-right font-mono">{c.bid.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{c.ask.toFixed(2)}</td>
                           <td className="px-2 py-1 text-right font-mono">{(c.impliedVolatility * 100).toFixed(0)}%</td>
