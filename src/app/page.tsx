@@ -36,24 +36,57 @@ interface OptionContract {
 
 const DONATION_ADDRESS = "0x73B61c903Cab90D5C251E58FEa6D90cC3d006a68";
 
-function hoursUntil4pmET(): number {
+function getETTimeParts(): { h: number; m: number; s: number; dow: number } {
   const now = new Date();
-  // Use IANA timezone to correctly handle EST/EDT automatically
-  const etParts = new Intl.DateTimeFormat("en-US", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     hour: "numeric",
     minute: "numeric",
     second: "numeric",
+    weekday: "short",
     hour12: false,
   }).formatToParts(now);
-  const h = parseInt(etParts.find(p => p.type === "hour")!.value);
-  const m = parseInt(etParts.find(p => p.type === "minute")!.value);
-  const s = parseInt(etParts.find(p => p.type === "second")!.value);
+  const h = parseInt(parts.find(p => p.type === "hour")!.value);
+  const m = parseInt(parts.find(p => p.type === "minute")!.value);
+  const s = parseInt(parts.find(p => p.type === "second")!.value);
+  const weekday = parts.find(p => p.type === "weekday")!.value; // e.g. "Mon"
+  const dowMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = dowMap[weekday] ?? new Date().getDay();
+  return { h, m, s, dow };
+}
+
+// Returns true if NYSE is currently in a trading session (Mon-Fri, 9:30-16:00 ET)
+function isMarketOpen(): boolean {
+  const { h, m, dow } = getETTimeParts();
+  if (dow === 0 || dow === 6) return false;
+  const etMinutes = h * 60 + m;
+  return etMinutes >= 9 * 60 + 30 && etMinutes < 16 * 60;
+}
+
+// Hours remaining in today's session (0 if market closed/after hours)
+function hoursLeftToday(): number {
+  const { h, m, s, dow } = getETTimeParts();
+  if (dow === 0 || dow === 6) return 0;
   const etMinutes = h * 60 + m + s / 60;
-  const closeMinutes = 16 * 60; // 4:00 PM
-  const diffMinutes = closeMinutes - etMinutes;
-  if (diffMinutes <= 0) return 0;
-  return Math.min(diffMinutes / 60, 6.5);
+  const closeMinutes = 16 * 60;
+  if (etMinutes < 9 * 60 + 30) {
+    // Pre-market: full session remaining
+    return 6.5;
+  }
+  const diff = closeMinutes - etMinutes;
+  return diff > 0 ? Math.min(diff / 60, 6.5) : 0;
+}
+
+// Compute TTE in hours for a given DTE
+// 0 DTE: remaining hours today (capped to 6.5)
+// 1 DTE: remaining today (if open) + full 6.5h tomorrow session
+function hoursUntilExpiry(dte: 0 | 1): number {
+  if (dte === 0) {
+    return hoursLeftToday();
+  }
+  // 1 DTE: next trading day is a full 6.5h session
+  const todayHours = isMarketOpen() ? hoursLeftToday() : 0;
+  return todayHours + 6.5;
 }
 
 export default function Home() {
@@ -63,7 +96,7 @@ export default function Home() {
   const [strikePrice, setStrikePrice] = useState<string>("590");
   const [costBasis, setCostBasis] = useState<string>("1.50");
   const [iv, setIv] = useState<string>("25");
-  const [timeToExpiry, setTimeToExpiry] = useState<string>(() => hoursUntil4pmET().toFixed(2));
+  const [timeToExpiry, setTimeToExpiry] = useState<string>(() => hoursUntilExpiry(0).toFixed(2));
   const [riskFreeRate] = useState<string>("5.25");
   const [rangeBelow, setRangeBelow] = useState<string>("5");
   const [rangeAbove, setRangeAbove] = useState<string>("5");
@@ -217,9 +250,9 @@ export default function Home() {
         setIv((contract.impliedVolatility * 100).toFixed(1));
       }
       // Auto-populate time to expiry from current ET clock
-      setTimeToExpiry(hoursUntil4pmET().toFixed(2));
+      setTimeToExpiry(hoursUntilExpiry(dte).toFixed(2));
     },
-    []
+    [dte]
   );
 
   const handleCopyDonation = useCallback(() => {
