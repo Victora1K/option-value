@@ -101,19 +101,22 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Fetch snapshot for all option contracts to get greeks and pricing
-    const optionsSnapshotRes = await fetch(
-      `${POLYGON_BASE}/v3/snapshot/options/${ticker}?expiration_date=${expDate}&limit=250&apiKey=${apiKey}`,
-      { cache: "no-store" }
-    );
+    // Fetch calls and puts separately so each side gets its own 250-slot limit.
+    // This prevents one side from crowding out the other and guarantees ATM
+    // coverage on both sides regardless of how many total contracts exist.
+    // Use a wide strike range (±20%) centered on the live price.
+    const strikeLow = (currentPrice * 0.80).toFixed(2);
+    const strikeHigh = (currentPrice * 1.20).toFixed(2);
 
-    let optionsWithGreeks: OptionContract[] = [];
+    const snapshotBase = `${POLYGON_BASE}/v3/snapshot/options/${ticker}?expiration_date=${expDate}&limit=250&apiKey=${apiKey}`;
 
-    if (optionsSnapshotRes.ok) {
-      const optionsSnapshotData = await optionsSnapshotRes.json();
-      const snapshots = optionsSnapshotData.results || [];
+    const [callsRes, putsRes] = await Promise.all([
+      fetch(`${snapshotBase}&contract_type=call&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}`, { cache: "no-store" }),
+      fetch(`${snapshotBase}&contract_type=put&strike_price_gte=${strikeLow}&strike_price_lte=${strikeHigh}`, { cache: "no-store" }),
+    ]);
 
-      optionsWithGreeks = snapshots.map((snap: PolygonOptionSnapshot) => ({
+    function mapSnapshot(snap: PolygonOptionSnapshot): OptionContract {
+      return {
         ticker: snap.details?.ticker || "",
         strikePrice: snap.details?.strike_price || 0,
         optionType: snap.details?.contract_type?.toLowerCase() || "call",
@@ -129,9 +132,18 @@ export async function GET(request: NextRequest) {
         gamma: snap.greeks?.gamma || 0,
         theta: snap.greeks?.theta || 0,
         vega: snap.greeks?.vega || 0,
-      }));
+      };
+    }
+
+    let optionsWithGreeks: OptionContract[] = [];
+
+    if (callsRes.ok && putsRes.ok) {
+      const [callsData, putsData] = await Promise.all([callsRes.json(), putsRes.json()]);
+      const callSnaps: PolygonOptionSnapshot[] = callsData.results || [];
+      const putSnaps: PolygonOptionSnapshot[] = putsData.results || [];
+      optionsWithGreeks = [...callSnaps.map(mapSnapshot), ...putSnaps.map(mapSnapshot)];
     } else {
-      // Fallback: use contract data without greeks
+      // Fallback: derive from contracts reference data (no greeks)
       optionsWithGreeks = contracts.map((c: PolygonContract) => ({
         ticker: c.ticker,
         strikePrice: c.strike_price,
